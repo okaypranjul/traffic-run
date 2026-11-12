@@ -13,6 +13,11 @@
   #help { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: rgba(17,17,17,.82); color: #fff;
           padding: 8px 16px; border-radius: 999px; font-size: 13px; white-space: nowrap; }
   #help b { color: #ffc400; }
+  #lives { letter-spacing: 2px; color: #ff3b3b; margin-left: 6px; } #lives i { font-style: normal; color: #555; }
+  #over { position: fixed; inset: 0; display: grid; place-content: start center; padding-top: 9vh; justify-items: center; gap: 10px; color: #fff; text-align: center;
+          background: radial-gradient(ellipse at center, rgba(60,0,0,.25), rgba(20,0,0,.72)); opacity: 0; pointer-events: none; transition: opacity 1.2s; }
+  #over.show { opacity: 1; } #over h1 { margin: 0; font-size: 64px; letter-spacing: 2px; text-shadow: 0 4px 0 #7a0c0c; }
+  #over p { margin: 0; font-size: 20px; font-weight: 600; } #over b { color: #ffc400; }
   #loading { position: fixed; inset: 0; z-index: 10; display: grid; place-content: center; justify-items: center; gap: 14px; background: #ffc400; color: #111; font-weight: 700; font-size: 18px; transition: opacity .5s; }
   #loading.gone { opacity: 0; pointer-events: none; }
   #loading .spin { width: 42px; height: 42px; border-radius: 50%; border: 5px solid rgba(17,17,17,.2); border-top-color: #111; animation: spin .8s linear infinite; }
@@ -23,7 +28,8 @@
 <script type="importmap">{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js", "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/" } }</script>
 </head>
 <body>
-<div id="hud"><span class="coin">C</span><span id="credits">0</span></div>
+<div id="hud"><span class="coin">C</span><span id="credits">0</span><span id="lives"></span></div>
+<div id="over"><h1>GAME OVER</h1><p>Credits collected: <b id="final">0</b></p><p>Press <b>Enter</b> to play again</p></div>
 <div id="toast"></div>
 <div id="loading"><div class="spin"></div><div>Loading <span id="loadpct"></span></div></div>
 <div id="help"><b>↑ ↓</b> walk &nbsp; <b>← →</b> turn &nbsp; <b>Shift</b> run &nbsp; <b>Space</b> jump &nbsp; <b>C</b> front view &nbsp; <b>N</b> day / night &nbsp; <b>M</b> sound</div>
@@ -324,6 +330,7 @@ function setupRig(gltf) {
       out.rig.dbg = { mocap, rest, sides, MAP };
     },
     pose(st) {
+      if (st.dead) { if (mocap) for (const L of mocap.links) L.r.b.quaternion.copy(L.r.local); handMadePose(); handPose(0); return; }   // collapsing: no mocap, body placed by animateDeath
       if (!mocap) { handMadePose(); handPose(st.run); return; }
       const { mixer, act, links, src, sh, shRest, scale } = mocap;
       act.idle.setEffectiveWeight(1 - st.move); act.walk.setEffectiveWeight(st.move * (1 - st.run)); act.run.setEffectiveWeight(st.move * st.run);
@@ -986,28 +993,177 @@ function buildAuto() {
   mesh(new THREE.BoxGeometry(.36, .46, .22), mat(0x8a7a52, .9), 0, 1.38, -.05, tilt); mesh(new THREE.SphereGeometry(.11, 14, 10), mat(0x2b2b2b, .8), 0, 1.71, -.04, tilt);
   g.traverse(o => { if (o.isMesh) o.receiveShadow = false; });
   const glow = new THREE.Mesh(new THREE.PlaneGeometry(5.5, 9).rotateX(-Math.PI / 2), A.glow); glow.position.set(0, .03, 5.8); g.add(glow);          // light thrown on the road ahead
-  return { g, tilt, wheels, lamp: A.lamp, beam: A.beam, glow: A.glow, amber: A.amber };
+  return { g, tilt, wheels, lamp: A.lamp, beam: A.beam, glow: A.glow, amber: A.amber,
+    kind: 'auto', name: 'an auto', hw: .72, hl: 1.25, wr: .26, vMin: 6, vMax: 9.5, lean: -.035, shake: .008, honk: 1,
+    snd: { wave: 'sawtooth', base: 46, perV: 4.2, lp: 850, chop: .55, depth: .45, lfo: 8, lfoV: 1.5, vol: .2 } };
 }
 
-const AUTO_COUNT = 3, AUTO_HALF_W = .72, AUTO_HALF_L = 1.25, LANE_MAX = 4.1;
+// Shared light materials for the other vehicles (same fields the traffic code drives: lamp, beam, glow, amber[left/right]).
+function vehicleLights() {
+  return {
+    black: mat(0x161616, .6), grey: mat(0x9a9a9a, .4), tyre: mat(0x111111, .85),
+    glass: new THREE.MeshStandardMaterial({ color: 0x141c22, roughness: .12, metalness: .4 }),
+    lamp: new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xfff3c4, emissiveIntensity: 1.6 }),
+    amber: [0, 1].map(() => new THREE.MeshStandardMaterial({ color: 0xff8a1e, emissive: 0xff6a00, emissiveIntensity: .5 })),
+    red: new THREE.MeshStandardMaterial({ color: 0xd11f1f, emissive: 0x900000, emissiveIntensity: .6 }),
+    beam: new THREE.MeshBasicMaterial({ map: BEAM_TEX, color: 0xfff0c0, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: false }),
+    glow: new THREE.MeshBasicMaterial({ map: GLOW_TEX, color: 0xffe2a0, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false, fog: false }),
+  };
+}
+// A side profile (list of [z, y] points) extruded across the vehicle's width; front is +z.
+const profile = (pts, w) => { const sh = new THREE.Shape(); pts.forEach(([z, y], i) => i ? sh.lineTo(z, y) : sh.moveTo(z, y)); return new THREE.ExtrudeGeometry(sh, { depth: w, bevelEnabled: false }).translate(0, 0, -w / 2).rotateY(-Math.PI / 2); };
+
+/* ---------- hatchback car ---------- */
+const CAR_COLORS = [0xf2f2ee, 0xc9ccd1, 0xb3261e, 0x1f3f7a, 0x2b2d31, 0xd98e1f, 0x7a8c94, 0x8a1c2b];
+function buildCar() {
+  const A = vehicleLights(), paint = new THREE.MeshStandardMaterial({ color: rp(CAR_COLORS), roughness: .35, metalness: .25 });
+  const g = group(), tilt = group(0, 0, 0, g), wheels = [], W = 1.62;
+  // body shell: lower body with bonnet and hatch, then the cabin on top
+  mesh(profile([[-1.8, .32], [-1.86, .62], [-1.82, .9], [-1.6, .98], [.72, .98], [1.5, .88], [1.82, .74], [1.86, .5], [1.8, .32]], W), paint, 0, 0, 0, tilt);
+  mesh(profile([[-1.62, .97], [-1.3, 1.46], [.08, 1.46], [.76, .97]], W - .16), paint, 0, 0, 0, tilt);
+  mesh(profile([[-1.28, 1.02], [-1.08, 1.4], [.04, 1.4], [.58, 1.02]], W - .14), A.glass, 0, 0, 0, tilt);                 // side windows
+  mesh(box(.05, .42, W - .13), paint, 0, 1.21, -.5, tilt).rotation.y = Math.PI / 2;                                       // door pillar
+  const ws = mesh(box(W - .3, .74, .03), A.glass, 0, 1.215, .435, tilt); ws.rotation.x = -.915;                          // windshield
+  const rw = mesh(box(W - .34, .5, .03), A.glass, 0, 1.215, -1.47, tilt); rw.rotation.x = .54;                           // rear glass
+  mesh(box(W + .02, .16, .1), A.black, 0, .4, 1.84, tilt); mesh(box(W + .02, .16, .1), A.black, 0, .4, -1.84, tilt);     // bumpers
+  mesh(box(.7, .16, .04), A.black, 0, .64, 1.86, tilt);                                                                  // grille
+  mesh(box(.42, .11, .03), mat(0xf4f4f0, .6), 0, .42, 1.9, tilt); mesh(box(.42, .11, .03), mat(0xf4f4f0, .6), 0, .56, -1.88, tilt);   // number plates
+  mesh(box(W + .03, .1, 2.2), A.black, 0, .34, 0, tilt);                                                                 // sill
+  for (const s of [1, -1]) {
+    mesh(box(.36, .15, .06), A.lamp, s * .56, .72, 1.83, tilt).castShadow = false;                                       // headlight
+    mesh(box(.12, .09, .06), A.amber[s > 0 ? 0 : 1], s * .76, .6, 1.82, tilt);                                           // indicator
+    mesh(box(.3, .16, .05), A.red, s * .6, .8, -1.84, tilt);                                                             // tail light
+    const beam = new THREE.Mesh(BEAM_GEO, A.beam); beam.position.set(s * .56, .72, 1.9); beam.rotation.set(.07, s * .04, 0); tilt.add(beam);
+    mesh(box(.16, .1, .07), paint, s * (W / 2 + .07), 1.04, .62, tilt);                                                  // wing mirror
+    for (const z of [1.16, -1.14]) {
+      const w = mesh(new THREE.CylinderGeometry(.3, .3, .2, 22), A.tyre, s * .74, .3, z, g); w.rotation.z = Math.PI / 2; wheels.push(w);
+      mesh(new THREE.CylinderGeometry(.17, .17, .21, 14), A.grey, s * .745, .3, z, g).rotation.z = Math.PI / 2;
+      mesh(new THREE.CylinderGeometry(.37, .37, .12, 20, 1, false, Math.PI / 2, Math.PI), A.black, s * .77, .32, z, tilt).rotation.z = Math.PI / 2;   // wheel arch
+    }
+  }
+  g.traverse(o => { if (o.isMesh) o.receiveShadow = false; });
+  const glow = new THREE.Mesh(new THREE.PlaneGeometry(6, 10).rotateX(-Math.PI / 2), A.glow); glow.position.set(0, .03, 6.8); g.add(glow);
+  return { g, tilt, wheels, lamp: A.lamp, beam: A.beam, glow: A.glow, amber: A.amber,
+    kind: 'car', name: 'a car', hw: .83, hl: 1.88, wr: .3, vMin: 8, vMax: 12, lean: -.014, shake: .003, honk: .78,
+    snd: { wave: 'triangle', base: 34, perV: 3.1, lp: 420, chop: .92, depth: .08, lfo: 14, lfoV: 1, vol: .26 } };
+}
+
+/* ---------- scooty with a rider ---------- */
+const SCOOTY_COLORS = [0xe63946, 0xf2f2ee, 0x2a9d8f, 0xf4a261, 0x3a86ff, 0x9d4edd, 0x222428, 0xffd166];
+function buildScooty() {
+  const A = vehicleLights(), paint = new THREE.MeshStandardMaterial({ color: rp(SCOOTY_COLORS), roughness: .4, metalness: .15 });
+  const g = group(), tilt = group(0, 0, 0, g), wheels = [], skin = mat(rp([0xb07a4e, 0x9c6a40, 0xc08a5c, 0x8a5a36]), .8);
+  for (const z of [.66, -.6]) {
+    const w = mesh(new THREE.CylinderGeometry(.21, .21, .1, 20), A.tyre, 0, .21, z, tilt); w.rotation.z = Math.PI / 2; wheels.push(w);
+    mesh(new THREE.CylinderGeometry(.1, .1, .11, 12), A.grey, 0, .21, z, tilt).rotation.z = Math.PI / 2;
+  }
+  // body: front apron, floorboard, under-seat body, seat, front mudguard
+  mesh(profile([[.3, .3], [.38, .92], [.52, .98], [.6, .5], [.52, .3]], .44), paint, 0, 0, 0, tilt);                       // leg shield
+  mesh(box(.4, .07, .62), A.black, 0, .3, .06, tilt);                                                                     // floorboard
+  mesh(profile([[-.98, .52], [-.92, .74], [-.2, .76], [-.14, .3], [-.5, .28], [-.86, .4]], .42), paint, 0, 0, 0, tilt);   // rear body
+  mesh(profile([[-.9, .76], [-.86, .86], [-.2, .84], [-.16, .76]], .34), mat(0x2a2422, .9), 0, 0, 0, tilt);               // seat
+  mesh(new THREE.SphereGeometry(.25, 14, 8, 0, Math.PI * 2, 0, Math.PI / 2), paint, 0, .2, .66, tilt).scale.set(.34, 1, 1);
+  mesh(box(.05, .44, .05), A.grey, 0, .44, .6, tilt).rotation.x = -.3;                                                    // fork, tucked behind the apron
+  // handlebar cowl with the headlight, indicators, mirrors
+  const cowl = group(0, 1.02, .5, tilt);
+  mesh(box(.34, .17, .2), paint, 0, 0, 0, cowl); mesh(box(.62, .045, .045), A.black, 0, .03, -.06, cowl);
+  mesh(new THREE.CircleGeometry(.075, 18), A.lamp, 0, 0, .102, cowl).castShadow = false;
+  const beam = new THREE.Mesh(BEAM_GEO, A.beam); beam.position.set(0, 1.02, .62); beam.rotation.set(.12, 0, 0); beam.scale.set(.8, .8, .85); tilt.add(beam);
+  for (const s of [1, -1]) {
+    mesh(box(.06, .05, .04), A.amber[s > 0 ? 0 : 1], s * .2, -.02, .09, cowl);
+    mesh(new THREE.CylinderGeometry(.008, .008, .2, 5), A.black, s * .27, .13, -.06, cowl);
+    mesh(box(.1, .07, .02), A.black, s * .28, .25, -.06, cowl);
+  }
+  mesh(box(.14, .08, .04), A.red, 0, .66, -.98, tilt); mesh(box(.2, .09, .02), mat(0xf4f4f0, .6), 0, .54, -1.0, tilt);
+  // rider: helmet, shirt, arms reaching the bars, legs on the floorboard
+  const shirt = mat(rp([0x2f6fb0, 0xd9534f, 0xf0e6d2, 0x3d7a4a, 0x6c5ce7, 0xe9a23b]), .85), pants = mat(rp([0x2b3a55, 0x3a3a3a, 0x5a4a3a]), .9);
+  const torso = mesh(box(.36, .5, .22), shirt, 0, 1.12, -.36, tilt); torso.rotation.x = .12;
+  mesh(new THREE.SphereGeometry(.13, 14, 10), mat(rp([0x1a1a1a, 0xd62828, 0xf1f1f1, 0x1d3557]), .35), 0, 1.5, -.3, tilt);                  // helmet
+  mesh(box(.2, .08, .02), A.glass, 0, 1.5, -.175, tilt);                                                                  // visor
+  for (const s of [1, -1]) {
+    const arm = mesh(box(.085, .085, .62), shirt, s * .225, 1.16, .0, tilt); arm.rotation.x = .28;
+    mesh(new THREE.SphereGeometry(.05, 8, 6), skin, s * .26, 1.07, .3, tilt);
+    mesh(box(.13, .13, .46), pants, s * .11, .86, -.2, tilt);                                                             // thigh
+    mesh(box(.11, .46, .12), pants, s * .11, .6, .04, tilt); mesh(box(.1, .06, .24), A.black, s * .11, .37, .1, tilt);    // shin, shoe
+  }
+  g.traverse(o => { if (o.isMesh) o.receiveShadow = false; });
+  const glow = new THREE.Mesh(new THREE.PlaneGeometry(3.4, 7).rotateX(-Math.PI / 2), A.glow); glow.position.set(0, .03, 4.4); g.add(glow);
+  return { g, tilt, wheels, lamp: A.lamp, beam: A.beam, glow: A.glow, amber: A.amber,
+    kind: 'scooty', name: 'a scooty', hw: .36, hl: .98, wr: .21, vMin: 7, vMax: 11, lean: .085, shake: .004, honk: 1.4,
+    snd: { wave: 'sawtooth', base: 78, perV: 5.5, lp: 1300, chop: .7, depth: .3, lfo: 17, lfoV: 2.2, vol: .13 } };
+}
+
+/* ---------- motorbike with a rider ---------- */
+const BIKE_COLORS = [0x111316, 0xb3261e, 0x1f3f7a, 0xe07b00, 0x2e6b3a, 0x8a8f96];
+function buildBike() {
+  const A = vehicleLights(), paint = new THREE.MeshStandardMaterial({ color: rp(BIKE_COLORS), roughness: .35, metalness: .3 });
+  const g = group(), tilt = group(0, 0, 0, g), wheels = [], skin = mat(rp([0xb07a4e, 0x9c6a40, 0xc08a5c, 0x8a5a36]), .8), dark = mat(0x2a2c30, .6);
+  for (const z of [.74, -.68]) {
+    const w = mesh(new THREE.CylinderGeometry(.3, .3, .1, 22), A.tyre, 0, .3, z, tilt); w.rotation.z = Math.PI / 2; wheels.push(w);
+    mesh(new THREE.CylinderGeometry(.19, .19, .11, 14), A.grey, 0, .3, z, tilt).rotation.z = Math.PI / 2;
+  }
+  mesh(box(.24, .3, .46), dark, 0, .5, .02, tilt);                                                                       // engine
+  mesh(profile([[-.12, .72], [-.04, .93], [.4, .92], [.5, .74]], .3), paint, 0, 0, 0, tilt);                             // tank
+  mesh(profile([[-.78, .8], [-.74, .9], [-.1, .87], [-.08, .76], [-.5, .74]], .27), mat(0x1e1b1a, .9), 0, 0, 0, tilt);   // seat
+  mesh(box(.15, .05, .46), paint, 0, .7, -.72, tilt).rotation.x = -.2;                                                   // rear mudguard
+  mesh(box(.13, .04, .4), paint, 0, .64, .76, tilt);                                                                     // front mudguard
+  for (const s of [1, -1]) mesh(box(.04, .82, .04), A.grey, s * .09, .68, .62, tilt).rotation.x = -.3;                   // forks
+  mesh(new THREE.CylinderGeometry(.045, .055, .8, 8), A.grey, .17, .36, -.42, tilt).rotation.x = Math.PI / 2 - .08;      // exhaust
+  mesh(new THREE.SphereGeometry(.13, 14, 10), A.black, 0, 1.0, .58, tilt).scale.z = .8;
+  mesh(new THREE.CircleGeometry(.095, 18), A.lamp, 0, 1.0, .69, tilt).castShadow = false;                                // headlight
+  const beam = new THREE.Mesh(BEAM_GEO, A.beam); beam.position.set(0, 1.0, .72); beam.rotation.set(.12, 0, 0); beam.scale.set(.8, .8, .9); tilt.add(beam);
+  mesh(box(.66, .04, .04), A.black, 0, 1.12, .44, tilt);                                                                 // handlebar
+  for (const s of [1, -1]) { mesh(box(.06, .05, .04), A.amber[s > 0 ? 0 : 1], s * .2, .95, .6, tilt); mesh(box(.09, .06, .02), A.black, s * .3, 1.24, .42, tilt); }
+  mesh(box(.12, .07, .04), A.red, 0, .76, -.95, tilt); mesh(box(.2, .1, .02), mat(0xf4f4f0, .6), 0, .62, -.97, tilt);
+  // rider, leaning into the bars
+  const shirt = mat(rp([0x2f6fb0, 0xd9534f, 0xf0e6d2, 0x3d7a4a, 0x6c5ce7, 0xe9a23b, 0x444a55]), .85), pants = mat(rp([0x2b3a55, 0x3a3a3a, 0x5a4a3a]), .9);
+  mesh(box(.38, .54, .24), shirt, 0, 1.2, -.26, tilt).rotation.x = .3;
+  mesh(new THREE.SphereGeometry(.14, 14, 10), mat(rp([0x1a1a1a, 0xd62828, 0xf1f1f1, 0x1d3557, 0xf2b705]), .35), 0, 1.6, -.1, tilt);
+  mesh(box(.21, .08, .02), A.glass, 0, 1.6, .035, tilt);
+  for (const s of [1, -1]) {
+    mesh(box(.085, .085, .6), shirt, s * .24, 1.24, .14, tilt).rotation.x = .2;
+    mesh(new THREE.SphereGeometry(.05, 8, 6), skin, s * .28, 1.15, .43, tilt);
+    mesh(box(.14, .14, .5), pants, s * .16, .86, -.14, tilt);
+    mesh(box(.11, .46, .12), pants, s * .18, .6, .08, tilt); mesh(box(.1, .06, .24), A.black, s * .18, .37, .12, tilt);
+  }
+  g.traverse(o => { if (o.isMesh) o.receiveShadow = false; });
+  const glow = new THREE.Mesh(new THREE.PlaneGeometry(3.6, 8).rotateX(-Math.PI / 2), A.glow); glow.position.set(0, .03, 4.9); g.add(glow);
+  return { g, tilt, wheels, lamp: A.lamp, beam: A.beam, glow: A.glow, amber: A.amber,
+    kind: 'bike', name: 'a bike', hw: .36, hl: 1.05, wr: .3, vMin: 9, vMax: 13.5, lean: .09, shake: .005, honk: 1.2,
+    snd: { wave: 'sawtooth', base: 52, perV: 5, lp: 950, chop: .6, depth: .4, lfo: 11, lfoV: 1.8, vol: .15 } };
+}
+
+// Mixed oncoming traffic. `autos` holds every vehicle (autos, cars and scooties); they all drive by the same rules.
+const ROAD_EDGE = 4.82;
 const autos = [];
 function respawnAuto(a, first) {
   // Most autos take the line the player is on right now, so they come straight at you; the rest pick any lane.
   // After that they never react to the player: they hold their line and only steer for stones and potholes.
-  const lanes = [-3, -1.5, 0, 1.5, 3];
-  a.home = Math.random() < .65 ? THREE.MathUtils.clamp(P.pos.x, -LANE_MAX, LANE_MAX) + (Math.random() - .5) * .4
+  const lanes = [-3, -1.5, 0, 1.5, 3], LANE_MAX = ROAD_EDGE - a.hw;
+  a.home = Math.random() < .6 ? THREE.MathUtils.clamp(P.pos.x, -LANE_MAX, LANE_MAX) + (Math.random() - .5) * .4
                                : lanes[(Math.random() * lanes.length) | 0] + (Math.random() - .5) * .5;
   a.x = a.home; a.vx = 0; a.yaw = 0;
   for (let tries = 0; tries < 12; tries++) {      // start on a clear stretch, not on top of an obstacle
-    a.z = P.pos.z + (first ? 45 : 70) + Math.random() * 45 + autos.indexOf(a) * 18;
-    if (![...stones, ...potholes].some(o => wd(a.z - o.z) > -4 && wd(a.z - o.z) < 9 && Math.abs(o.x - a.x) < o.r + AUTO_HALF_W + .3)) break;
+    a.z = P.pos.z + (first ? 40 + Math.random() * 170 : 85 + Math.random() * 125);
+    if (![...stones, ...potholes].some(o => wd(a.z - o.z) > -4 && wd(a.z - o.z) < 9 && Math.abs(o.x - a.x) < o.r + a.hw + .3)
+      && !autos.some(b => b !== a && b.z !== undefined && Math.abs(b.z - a.z) < a.hl + b.hl + 6 && Math.abs(b.x - a.x) < a.hw + b.hw + .4)) break;   // nor on top of another vehicle
   }
-  a.speed = 6 + Math.random() * 3.5; a.v = a.speed; a.honked = false;
+  a.speed = a.vMin + Math.random() * (a.vMax - a.vMin); a.v = a.speed; a.honked = false; a.stuck = 0; a.jam = 0; a.ghost = 0;
 }
-for (let i = 0; i < AUTO_COUNT; i++) { const a = buildAuto(); autos.push(a); live.add(a.g); }
+// With this many vehicles, every small part casting its own shadow costs too much: each vehicle casts one simple box-shaped shadow instead.
+const SHADOW_ONLY = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false });
+function cheapShadow(a) {
+  a.g.traverse(o => { if (o.isMesh) o.castShadow = false; });
+  const two = a.hw < .5, h = a.kind === 'auto' ? 1.6 : two ? 1.45 : 1.15;
+  const m = new THREE.Mesh(new THREE.BoxGeometry(a.hw * 2 - (two ? .25 : .1), h, a.hl * 2 - .15), SHADOW_ONLY); m.position.y = .3 + h / 2; m.castShadow = true; a.tilt.add(m);
+}
+// Congested traffic: 4 autos, 6 cars, 4 scooties and 4 bikes on the road at once.
+for (const build of [buildAuto, buildCar, buildBike, buildScooty, buildCar, buildAuto, buildBike, buildCar, buildScooty,
+                     buildCar, buildAuto, buildScooty, buildBike, buildCar, buildAuto, buildCar, buildScooty, buildBike]) { const a = build(); cheapShadow(a); autos.push(a); live.add(a.g); }
 
 function updateAutos(dt, t) {
   for (const a of autos) {
+    const AUTO_HALF_W = a.hw, AUTO_HALF_L = a.hl, LANE_MAX = ROAD_EDGE - a.hw;
     if (a.z === undefined) respawnAuto(a, true);
     if (a.z < P.pos.z - 30 || a.z > P.pos.z + 260) respawnAuto(a);
 
@@ -1016,35 +1172,67 @@ function updateAutos(dt, t) {
     const ahead = [];
     for (const list of [stones, potholes]) for (const o of list) { const d = wd(a.z - o.z); if (d > -(o.r + AUTO_HALF_L + .4) && d < 24) ahead.push(o); }
     let first = Infinity; for (const o of ahead) first = Math.min(first, wd(a.z - o.z));
-    const near = first < 13 ? ahead.filter(o => wd(a.z - o.z) < first + 4) : [];      // whatever comes first has to be cleared; later ones can wait
+    const near = first < Math.max(13, a.speed * 1.7) ? ahead.filter(o => wd(a.z - o.z) < first + 4) : [];      // whatever comes first has to be cleared; later ones can wait
     const room = (x, list) => { let m = Infinity; for (const o of list) m = Math.min(m, Math.abs(o.x - x) - o.r - AUTO_HALF_W - .18); return m; };
+    // Another vehicle is "in the way" of moving over to x if it is level with this one (or just ahead) and sits in the strip being crossed.
+    // Whoever is behind gives way; vehicles in the same lane ahead are handled by the following-distance rule below.
+    const ai = autos.indexOf(a), ghost = a.ghost > 0;
+    const inWay = x => { if (ghost) return null; const lo = Math.min(a.x, x), hi = Math.max(a.x, x);
+      for (const b of autos) { if (b === a || b.z === undefined) continue; const dzb = a.z - b.z, len = a.hl + b.hl, wid = a.hw + b.hw;
+        if ((dzb > .05 || (dzb > -.05 && autos.indexOf(b) < ai)) && dzb < len + 3.5 && Math.abs(b.x - a.x) > wid + .05 && b.x > lo - wid - .3 && b.x < hi + wid + .3) return b; }
+      return null; };
     let want = a.home;
     if (room(want, near) < 0) {            // only leave the lane for the obstacle that is actually next, then come straight back
       let best = -Infinity;
       for (const o of ahead) for (const x of [o.x - o.r - AUTO_HALF_W - .35, o.x + o.r + AUTO_HALF_W + .35]) {
         if (Math.abs(x) > LANE_MAX) continue;
         const r = room(x, near);          // the next obstacle must be cleared; the one after is only a preference
-        const score = (r >= 0 ? 100 : r * 10) + (room(x, ahead) >= 0 ? .5 : 0) - Math.abs(x - a.home) - Math.abs(x - a.x) * .3;
+        const score = (r >= 0 ? 100 : r * 10) + (room(x, ahead) >= 0 ? .5 : 0) - Math.abs(x - a.home) - Math.abs(x - a.x) * .3 - (inWay(x) ? 60 : 0);
         if (score > best) { best = score; want = x; }
       }
     }
-    // brake if there isn't time to get across before the obstacle, and don't rear-end the auto in front
+    const blocker = Math.abs(want - a.x) > .15 ? inWay(want) : null, boxed = !!blocker;      // the way across is taken: hold the line and let that vehicle get ahead
+    // brake if there isn't time to get across before the obstacle, and don't rear-end the vehicle in front
     let limit = a.speed;
     for (const o of near) {
       const d = wd(a.z - o.z) - o.r - AUTO_HALF_L;
-      if (d > 0 && Math.abs(o.x - a.x) < o.r + AUTO_HALF_W + .1) limit = Math.min(limit, Math.max(.4, d / (Math.abs(want - a.x) / 2.2 + .2)));
+      if (d > 0 && Math.abs(o.x - a.x) < o.r + AUTO_HALF_W + .1) limit = Math.min(limit, boxed ? Math.max(0, (d - .5) * 1.2) : Math.max(0, d - .2) / (Math.abs(want - a.x) / 2.2 + .2));   // boxed in: stop short of the obstacle; otherwise slow to a crawl and wait at its edge until clear
     }
-    for (const b of autos) if (b !== a && b.z !== undefined && a.z - b.z > 0 && a.z - b.z < 7 && Math.abs(a.x - b.x) < 1.7) limit = Math.min(limit, b.v * .9);
+    if (blocker) {                         // level with it: drop back (reversing a little if it has stopped) so it can pull across; otherwise just follow it through
+      const level = a.z - blocker.z < a.hl + blocker.hl + .4;
+      limit = Math.min(limit, level ? blocker.v - 1.6 : Math.max(blocker.v * .8, 1));
+      if (limit < 0 && autos.some(c => c !== a && c.z !== undefined && c.z > a.z && c.z - a.z < a.hl + c.hl + 1 && Math.abs(c.x - a.x) < a.hw + c.hw + .2)) limit = 0;   // no room behind to back up
+      if (limit < 0 && [...stones, ...potholes].some(o => { const d = wd(o.z - a.z); return d > 0 && d < o.r + a.hl + .6 && Math.abs(o.x - a.x) < o.r + a.hw + .1; })) limit = 0;   // nor into a pothole
+    }
+    let slow = null;
+    for (const b of autos) if (b !== a && b.z !== undefined && a.z - b.z > 0 && a.z - b.z < a.hl + b.hl + 5.5 && Math.abs(a.x - b.x) < a.hw + b.hw + .25 && b.v * .9 < limit) { limit = a.z - b.z < a.hl + b.hl + 1.2 ? b.v * .5 : b.v * .9; slow = b; }
+    // stuck behind something slower: after a moment, move over to a free line beside it and overtake (other vehicles only, never the player)
+    a.stuck = slow ? a.stuck + dt : 0;
+    if (slow && a.stuck > .7) {
+      const gap = a.hw + slow.hw + .7, free = x => Math.abs(x) <= LANE_MAX && !autos.some(b => b !== a && b !== slow && b.z !== undefined && Math.abs(b.z - a.z) < a.hl + b.hl + 5 && Math.abs(b.x - x) < a.hw + b.hw + .3);
+      const opts = [slow.x - gap, slow.x + gap].filter(free).sort((p, q) => Math.abs(p - a.x) - Math.abs(q - a.x));
+      if (opts.length) { a.home = opts[0]; a.stuck = 0; }
+    }
     a.v = damp(a.v, limit, limit < a.v ? 9 : 2, dt);
     const speed = a.v;
+    // last resort for a jam that will not clear: after a few seconds at a standstill, push through regardless of the vehicles alongside
+    a.jam = Math.abs(speed) < .35 ? (a.jam || 0) + dt : 0; a.ghost = Math.max(0, (a.ghost || 0) - dt);
+    if (a.jam > 3.5) { a.ghost = 2; a.jam = 0; }
 
-    const latMax = Math.min(3.4, speed * .7 + 1), vxWant = THREE.MathUtils.clamp((want - a.x) * 2.6, -latMax, latMax);
-    a.vx = damp(a.vx, vxWant, 5, dt); a.x += a.vx * dt; a.z -= speed * dt;
+    const latMax = Math.min(3.4, speed * .7 + 1.6); let vxWant = boxed ? 0 : THREE.MathUtils.clamp((want - a.x) * 2.6, -latMax, latMax);
+    // and never slide sideways into a vehicle that is physically alongside
+    for (const b of autos) {
+      if (b === a || b.z === undefined || Math.abs(b.z - a.z) > a.hl + b.hl + .3) continue;
+      const side = Math.sign(b.x - a.x) || 1, gap = Math.abs(b.x - a.x) - a.hw - b.hw;
+      if (!ghost && gap < .3 && vxWant * side > 0) vxWant = 0;
+    }
+    a.boxed = boxed;
+    a.vx = damp(a.vx, vxWant, vxWant === 0 ? 12 : 5, dt); a.x += a.vx * dt; a.z -= speed * dt;
     a.yaw = damp(a.yaw, Math.atan2(a.vx, Math.max(speed, 4.5)), 8, dt);       // steering angle; capped so it never swings sideways when crawling
     a.g.position.set(a.x, 0, a.z); a.g.rotation.y = Math.PI - a.yaw;
-    a.tilt.rotation.z = damp(a.tilt.rotation.z, -a.vx * .035, 6, dt);                    // lean a little in the turn
-    a.tilt.position.y = Math.sin(t * 19 + a.home * 7) * .008;                             // engine shudder
-    for (const w of a.wheels) w.rotation.x -= speed * dt / .26;
+    a.tilt.rotation.z = damp(a.tilt.rotation.z, a.vx * a.lean, 6, dt);                    // autos and cars roll outwards a little, a scooty leans into the turn
+    a.tilt.position.y = Math.sin(t * 19 + a.home * 7) * a.shake;                             // engine shudder
+    for (const w of a.wheels) w.rotation.x -= speed * dt / a.wr;
 
     // lights: headlights come on at night and flash (the "dipper") when the auto is bearing down on the player; indicators blink on the side it is pulling over to
     const dz = a.z - P.pos.z, dx = P.pos.x - a.x, n = Math.max(0, nightNow);
@@ -1054,14 +1242,14 @@ function updateAutos(dt, t) {
     a.amber[0].emissiveIntensity = turn < -.45 && tick ? 3 : .35; a.amber[1].emissiveIntensity = turn > .45 && tick ? 3 : .35;
 
     // honk when it is bearing down on the player
-    if (!a.honked && dz > 0 && dz < 20 && Math.abs(dx) < 1.6) { a.honked = true; sfx.honk(THREE.MathUtils.clamp(dx / 5 * Math.cos(P.yaw), -1, 1), .16); }
+    if (!a.honked && dz > 0 && dz < 20 && Math.abs(dx) < 1.6) { a.honked = true; sfx.honk(THREE.MathUtils.clamp(dx / 5 * Math.cos(P.yaw), -1, 1), .16, a.honk); }
 
     // hit the player
-    if (P.inv <= 0 && P.falling <= 0 && Math.abs(dx) < AUTO_HALF_W + .28 && Math.abs(dz) < AUTO_HALF_L + .3 && P.pos.y < 1.5) {
+    if (P.inv <= 0 && P.falling <= 0 && !P.dying && !P.dead && Math.abs(dx) < AUTO_HALF_W + .28 && Math.abs(dz) < AUTO_HALF_L + .3 && P.pos.y < 1.5) {
       const side = dx >= 0 ? 1 : -1;
       P.kx = side * 7; P.kz = -speed * .7; P.vy = 5.5; P.grounded = false; P.speed = 0; P.inv = 1.6;
       const lost = Math.min(5, credits); credits -= lost; $credits.textContent = credits;
-      toast(lost ? `Hit by an auto!  −${lost} credits` : 'Hit by an auto!'); sfx.crash(0);
+      toast(lost ? `Hit by ${a.name}!  −${lost} credits` : `Hit by ${a.name}!`); sfx.crash(0); hurt();
     }
   }
 }
@@ -1111,6 +1299,7 @@ addEventListener('keydown', e => {
   if (e.code === 'KeyM' && !e.repeat && S.master) { S.muted = !S.muted; S.master.gain.value = S.muted ? 0 : .9; }
   if (e.code === 'KeyC' && !e.repeat) frontView = !frontView;
   if (e.code === 'KeyN' && !e.repeat) P.odo = nightAt(P.odo) < .5 ? DUSK[1] + 5 : DAY_CYCLE;      // skip to night / back to day
+  if (e.code === 'Enter' && P.dead > 4.5) restart();
   keys[e.code] = true;
 });
 addEventListener('keyup', e => keys[e.code] = false);
@@ -1122,17 +1311,17 @@ const S = { ctx: null, master: null, muted: false, autos: [], t: {} };
 function initSound() {          // browsers only allow sound after a key press or click, so this runs on the first one
   if (S.ctx) { if (S.ctx.state === 'suspended') S.ctx.resume(); return; }
   try {
-    const ctx = S.ctx = new AudioContext(), master = S.master = ctx.createGain(); master.gain.value = .9; master.connect(ctx.destination);
+    const ctx = S.ctx = new AudioContext(), master = S.master = ctx.createGain(); master.gain.value = .9; const comp = ctx.createDynamicsCompressor(); master.connect(comp).connect(ctx.destination);   // limiter: many engines at once must not distort
     const nb = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate), d = nb.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
     S.noise = nb;
     const loopNoise = (type, freq, q) => { const src = ctx.createBufferSource(), f = ctx.createBiquadFilter(), g = ctx.createGain(); src.buffer = nb; src.loop = true; f.type = type; f.frequency.value = freq; f.Q.value = q; g.gain.value = 0; src.connect(f).connect(g).connect(master); src.start(); return g; };
     S.city = loopNoise('lowpass', 240, .5);       // low rumble of a city in the distance
     S.air = loopNoise('bandpass', 950, .35);      // open-air hiss
     S.water = loopNoise('bandpass', 520, .9);     // lake lapping at the embankment
-    for (const a of autos) {                      // one two-stroke engine per auto: buzzy tone chopped into a putt-putt, placed left/right
+    for (const a of autos) {                      // one engine per vehicle, placed left/right: autos putt-putt, cars hum low, scooties buzz higher
       const o1 = ctx.createOscillator(), o2 = ctx.createOscillator(), mixG = ctx.createGain(), chop = ctx.createGain(), lfo = ctx.createOscillator(), depth = ctx.createGain(),
             lp = ctx.createBiquadFilter(), vol = ctx.createGain(), pan = ctx.createStereoPanner();
-      o1.type = 'sawtooth'; o2.type = 'square'; lfo.type = 'square'; lp.type = 'lowpass'; lp.frequency.value = 850; mixG.gain.value = .5; chop.gain.value = .55; depth.gain.value = .45; vol.gain.value = 0;
+      const q = a.snd; o1.type = q.wave; o2.type = a.kind === 'car' ? 'sine' : 'square'; lfo.type = a.kind === 'car' ? 'sine' : 'square'; lp.type = 'lowpass'; lp.frequency.value = q.lp; mixG.gain.value = .5; chop.gain.value = q.chop; depth.gain.value = q.depth; vol.gain.value = 0;
       o1.connect(mixG); o2.connect(mixG); mixG.connect(chop); lfo.connect(depth).connect(chop.gain); chop.connect(lp).connect(vol).connect(pan).connect(master);
       o1.start(); o2.start(); lfo.start(); S.autos.push({ a, o1, o2, lfo, vol, pan, shift: 1 });
     }
@@ -1159,7 +1348,8 @@ const sfx = {
   coin(n) { const f = 1320 * [1, 1.122, 1.26, 1.335, 1.498][n % 5]; tone(f, .22, 'sine', .11); tone(f * 1.5, .3, 'sine', .06, 0, 0, .05); },
   pothole() { tone(320, .55, 'sine', .16, 0, 60); puff(140, .2, .16, .7, 0, 0, .45); },
   crash(pan) { tone(95, .3, 'sawtooth', .22, pan, 45); puff(900, .28, .2, .6, pan, 250); },
-  honk(pan, vol) { for (const d of [0, .22]) { tone(430, .17, 'square', vol * .5, pan, 0, d); tone(545, .17, 'square', vol * .4, pan, 0, d); } },
+  die() { tone(220, 1.6, 'sine', .2, 0, 55); tone(165, 2.2, 'triangle', .12, 0, 41, .3); puff(120, .5, .18, .6, 0, 0, 2.1); },
+  honk(pan, vol, k = 1) { for (const d of [0, .22]) { tone(430 * k, .17, 'square', vol * .5, pan, 0, d); tone(545 * k, .17, 'square', vol * .4, pan, 0, d); } },   // k: pitch (car lower, scooty higher)
 };
 function updateSound(dt, night) {
   if (!S.ctx) return; const c = S.ctx, now = c.currentTime, set = (p, v) => p.setTargetAtTime(v, now, .25);
@@ -1171,9 +1361,9 @@ function updateSound(dt, night) {
     const a = e.a; if (a.z === undefined) continue;
     const dx = a.x - P.pos.x, dz = a.z - P.pos.z, dist = Math.hypot(dx, dz), near = Math.max(0, 1 - dist / 55);
     e.shift = damp(e.shift, dz > 0 ? 1.06 : .9, 6, dt);
-    const f = (46 + a.v * 4.2) * e.shift;
-    e.o1.frequency.setTargetAtTime(f, now, .05); e.o2.frequency.setTargetAtTime(f * 2.02, now, .05); e.lfo.frequency.setTargetAtTime(8 + a.v * 1.5, now, .05);
-    e.vol.gain.setTargetAtTime(near * near * .2, now, .06); e.pan.pan.setTargetAtTime(THREE.MathUtils.clamp((dx * rx + dz * rz) / 7, -1, 1), now, .06);
+    const q = a.snd, f = (q.base + a.v * q.perV) * e.shift;
+    e.o1.frequency.setTargetAtTime(f, now, .05); e.o2.frequency.setTargetAtTime(f * 2.02, now, .05); e.lfo.frequency.setTargetAtTime(q.lfo + a.v * q.lfoV, now, .05);
+    e.vol.gain.setTargetAtTime(near * near * q.vol, now, .06); e.pan.pan.setTargetAtTime(THREE.MathUtils.clamp((dx * rx + dz * rz) / 7, -1, 1), now, .06);
   }
   // scattered one-shots: birds by day (more of them by the park and lake), crickets at night, the odd far-off horn
   const T = S.t, due = (k, gap) => { if ((T[k] ?? 0) > now) return false; T[k] = now + gap; return true; };
@@ -1186,10 +1376,35 @@ function updateSound(dt, night) {
 }
 
 /* ---------- game state ---------- */
-const P = { pos: new THREE.Vector3(0, 0, 0), yaw: 0, vy: 0, speed: 0, grounded: true, phase: 0, air: 0, run: 0, move: 0, land: 0, falling: 0, inv: 0, kx: 0, kz: 0, odo: 0 };
+const P = { pos: new THREE.Vector3(0, 0, 0), yaw: 0, vy: 0, speed: 0, grounded: true, phase: 0, air: 0, run: 0, move: 0, land: 0, falling: 0, inv: 0, kx: 0, kz: 0, odo: 0, dying: false, dead: 0 };
 const lastSafe = new THREE.Vector3();
 let credits = 0, frontView = false, toastT = 0, camOff = 0;
 const $credits = document.getElementById('credits'), $toast = document.getElementById('toast');
+// Five lives: every hit from a vehicle and every fall into a pothole costs one. At zero she collapses on the road.
+const MAX_LIVES = 5; let lives = MAX_LIVES;
+const $lives = document.getElementById('lives'), $over = document.getElementById('over');
+function showLives() { $lives.innerHTML = '♥'.repeat(lives) + '<i>' + '♥'.repeat(MAX_LIVES - lives) + '</i>'; }
+function hurt() { lives = Math.max(0, lives - 1); showLives(); if (!lives) P.dying = true; }      // the collapse starts once she is back on the ground
+showLives();
+const blood = new THREE.Mesh(new THREE.PlaneGeometry(2.4, 2.4).rotateX(-Math.PI / 2), new THREE.MeshLambertMaterial({ transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
+  map: canvasTex(256, 256, (g, w) => { g.clearRect(0, 0, w, w); let seed = 7; const r = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+    g.fillStyle = '#7d0a0a'; for (let i = 0; i < 26; i++) { const a = r() * 6.28, d = r() * 52, rad = 26 + r() * 34; g.beginPath(); g.arc(128 + Math.cos(a) * d, 128 + Math.sin(a) * d * .8, rad, 0, 6.28); g.fill(); }
+    g.fillStyle = '#a81414'; for (let i = 0; i < 12; i++) { const a = r() * 6.28, d = r() * 34; g.beginPath(); g.arc(128 + Math.cos(a) * d, 128 + Math.sin(a) * d, 12 + r() * 20, 0, 6.28); g.fill(); }
+    g.fillStyle = '#7d0a0a'; for (let i = 0; i < 9; i++) { const a = r() * 6.28, d = 92 + r() * 22; g.beginPath(); g.arc(128 + Math.cos(a) * d, 128 + Math.sin(a) * d, 3 + r() * 6, 0, 6.28); g.fill(); } }) }));
+blood.visible = false; blood.castShadow = false; scene.add(blood);
+let deathSide = 1;
+function startDeath() {
+  const side = Math.sin(P.yaw + Math.PI + .7) * 9; deathSide = Math.abs(P.pos.x + side) < Math.abs(P.pos.x - side) ? 1 : -1;      // the camera drifts towards the middle of the road
+  P.dying = false; P.dead = .0001; P.speed = 0; P.kx = P.kz = 0; P.inv = 0; frontView = false; sfx.die();
+  blood.position.set(P.pos.x + Math.sin(P.yaw) * .95, P.pos.y + .02, P.pos.z + Math.cos(P.yaw) * .95); blood.rotation.y = P.yaw; blood.scale.setScalar(.01); blood.visible = true;
+}
+function restart() {
+  lives = MAX_LIVES; credits = 0; $credits.textContent = 0; showLives(); $over.classList.remove('show'); blood.visible = false;
+  P.dead = 0; P.dying = false; P.pos.copy(lastSafe); P.vy = 0; P.speed = 0; P.inv = 2; P.odo = 0; P.grounded = true;
+  ch.body.rotation.x = 0; ch.body.position.set(0, 0, 0);
+  for (const a of autos) a.z = undefined;                       // fresh traffic
+  for (const c of coins) c.visible = c.userData.twin.visible = true;
+}
 function toast(msg) { $toast.textContent = msg; $toast.style.opacity = 1; toastT = 1.2; }
 const WALK = 2.0, RUN = 6.2, TURN = 2.5, GRAV = 20, JUMP = 7;
 const lerp = THREE.MathUtils.lerp, damp = (a, b, k, dt) => lerp(a, b, 1 - Math.exp(-k * dt));
@@ -1201,23 +1416,28 @@ function groundAt(x, z) {
 }
 
 function update(dt) {
-  if (P.falling > 0) {                                   // dropped into a pothole
+  if (P.dead) {                                          // collapsed: nothing to control, just the scene playing out
+    P.dead += dt; blood.scale.setScalar(.01 + THREE.MathUtils.smoothstep(P.dead, 2.7, 9) * .99);
+    if (P.dead > 5 && !$over.classList.contains('show')) { document.getElementById('final').textContent = credits; $over.classList.add('show'); }
+  } else if (P.falling > 0) {                            // dropped into a pothole
     P.falling -= dt; P.pos.y -= dt * 3.5;
     ch.root.scale.setScalar(Math.max(.3, P.falling / .7)); ch.root.rotation.z += dt * 3;
     if (P.falling <= 0) {
       P.pos.copy(lastSafe); P.vy = 0; P.speed = 0; ch.root.scale.setScalar(1); ch.root.rotation.z = 0;
       const lost = Math.min(3, credits); credits -= lost; $credits.textContent = credits;
-      toast(lost ? `Pothole!  −${lost} credits` : 'Pothole!');
+      toast(lost ? `Pothole!  −${lost} credits` : 'Pothole!'); hurt(); P.inv = 1.2;
+      if (P.dying) startDeath();
     }
   } else {
-    const turn = (keys.ArrowLeft ? 1 : 0) - (keys.ArrowRight ? 1 : 0);
-    const fwd = (keys.ArrowUp ? 1 : 0) - (keys.ArrowDown ? 1 : 0);
+    const ok = !P.dying;                                 // on her last hit she can no longer be steered
+    const turn = ok ? (keys.ArrowLeft ? 1 : 0) - (keys.ArrowRight ? 1 : 0) : 0;
+    const fwd = ok ? (keys.ArrowUp ? 1 : 0) - (keys.ArrowDown ? 1 : 0) : 0;
     const running = fwd > 0 && (keys.ShiftLeft || keys.ShiftRight);
     P.yaw += turn * TURN * dt;
     const target = fwd > 0 ? (running ? RUN : WALK) : fwd < 0 ? -WALK * .6 : 0;
     P.speed = damp(P.speed, target, P.grounded ? 9 : 2, dt);
 
-    if (keys.Space && P.grounded) { P.vy = JUMP; P.grounded = false; sfx.jump(); }
+    if (ok && keys.Space && P.grounded) { P.vy = JUMP; P.grounded = false; sfx.jump(); }
 
     const dx = (Math.sin(P.yaw) * P.speed + P.kx) * dt, dz = (Math.cos(P.yaw) * P.speed + P.kz) * dt;
     P.kx = damp(P.kx, 0, 4, dt); P.kz = damp(P.kz, 0, 4, dt);
@@ -1240,15 +1460,16 @@ function update(dt) {
     for (const h of potholes) {
       const d = Math.hypot(P.pos.x - h.x, wd(P.pos.z - h.z));
       if (d < h.r + 1.3) nearHole = true;
-      if (P.grounded && P.pos.y < .05 && d < h.r - .12) { P.falling = .7; sfx.pothole(); }
+      if (ok && P.grounded && P.pos.y < .05 && d < h.r - .12) { P.falling = .7; sfx.pothole(); }
     }
     if (P.grounded && !nearHole) lastSafe.copy(P.pos);
+    if (P.dying && P.grounded && Math.hypot(P.kx, P.kz) < 1.5) startDeath();
   }
 
   updateAutos(dt, performance.now() / 1000);
   updateWalkers(dt);
   if (P.inv > 0) P.inv -= dt;
-  ch.root.visible = !(P.inv > 0 && Math.floor(performance.now() / 80) % 2);   // blink after a hit
+  ch.root.visible = P.dead || P.dying || !(P.inv > 0 && Math.floor(performance.now() / 80) % 2);   // blink after a hit
 
   // credits
   const t = performance.now() / 1000;
@@ -1262,15 +1483,23 @@ function update(dt) {
   }
   if (toastT > 0 && (toastT -= dt) <= 0) $toast.style.opacity = 0;
 
-  animate(dt, t);
+  if (P.dead) animateDeath(dt); else animate(dt, t);
 
   // camera + light follow
   const f = new THREE.Vector3(Math.sin(P.yaw + camOff), 0, Math.cos(P.yaw + camOff));
   const want = frontView ? P.pos.clone().addScaledVector(f, 2.6).add(new THREE.Vector3(0, 1.35, 0))
                          : P.pos.clone().addScaledVector(f, -4.8).add(new THREE.Vector3(0, 2.5, 0));
   want.y = Math.max(want.y, .6);
-  camera.position.lerp(want, 1 - Math.exp(-6 * dt));
-  camera.lookAt(P.pos.x, Math.max(P.pos.y, 0) + (frontView ? 1.1 : 1.25), P.pos.z);
+  if (P.dead) {                                          // slow pull back and up, drifting round to one side, looking down at her on the road
+    const k = THREE.MathUtils.smoothstep(P.dead, .4, 9), a = P.yaw + Math.PI + k * .7 * deathSide, d = lerp(4.8, 9, k);
+    want.set(THREE.MathUtils.clamp(P.pos.x + Math.sin(a) * d, -4.4, 4.4), P.pos.y + lerp(2.5, 7.5, k), P.pos.z + Math.cos(a) * d);   // stays over the road, never inside the houses
+    camera.position.lerp(want, 1 - Math.exp(-1.6 * dt));
+    const down = THREE.MathUtils.smoothstep(P.dead, 0, 3), fw = down * .7;
+    camera.lookAt(P.pos.x + Math.sin(P.yaw) * fw, P.pos.y + lerp(1.25, .25, down), P.pos.z + Math.cos(P.yaw) * fw);
+  } else {
+    camera.position.lerp(want, 1 - Math.exp(-6 * dt));
+    camera.lookAt(P.pos.x, Math.max(P.pos.y, 0) + (frontView ? 1.1 : 1.25), P.pos.z);
+  }
   sun.position.set(P.pos.x + 8, 18, P.pos.z - 6); sun.target.position.set(P.pos.x, 0, P.pos.z);
   placeTiles(); setNight(nightAt(P.odo)); updateSound(dt, Math.max(0, nightNow)); waterMat.map.offset.x += dt * .012; waterMat.map.offset.y += dt * .02;
   const spy = window.__game && window.__game.spy; if (spy) { camera.position.set(spy.x, spy.y, spy.z); camera.lookAt(spy.tx, spy.ty, spy.tz); }   // debug: park the camera somewhere
@@ -1328,6 +1557,27 @@ function animate(dt, t) {
   if (ch.rig) ch.rig.pose({ run, move, air, land: P.land, speed: P.speed, dt, falling: P.falling > 0 });
 }
 
+/* ---------- collapse: sink slowly to the knees, then fall forward and lie still ---------- */
+function animateDeath(dt) {
+  const ss = THREE.MathUtils.smoothstep, t = P.dead;
+  const k = ss(t, .2, 1.7);                              // onto the knees
+  const f0 = ss(t, 2.1, 3.0), f = f0 * f0;               // tipping forward, gathering speed
+  ch.root.position.copy(P.pos); ch.root.rotation.y = P.yaw; ch.root.rotation.z = 0; ch.root.scale.setScalar(1);
+  ch.body.scale.y = 1; ch.body.rotation.x = f * 1.5;
+  ch.body.position.set(0, lerp(-.4 * k, DEATH_LIE_Y, f), lerp(0, -.38, f));
+  const sway = Math.sin(t * 2.6) * .05 * k * (1 - f);    // unsteady while kneeling
+  ch.hips.rotation.set(0, 0, 0);
+  ch.legL.hip.rotation.x = lerp(-.1 * k, .04, f); ch.legR.hip.rotation.x = lerp(-.1 * k, .04, f);
+  ch.legL.knee.rotation.x = lerp(.05 + 1.7 * k, .12, f); ch.legR.knee.rotation.x = lerp(.05 + 1.7 * k, .5, f);
+  ch.torso.rotation.set(lerp(.42 * k, .04, f), 0, sway); ch.torso.scale.setScalar(1);
+  ch.head.rotation.set(lerp(.6 * k, .1, f), f * .95, sway);
+  ch.armR.shoulder.rotation.x = lerp(.12 * k, -2.45, f); ch.armR.shoulder.rotation.z = -.1 - f * .35; ch.armR.elbow.rotation.x = -lerp(.15, .7, f);
+  ch.armL.shoulder.rotation.x = lerp(.12 * k, .1, f);    ch.armL.shoulder.rotation.z = .1 + f * .45;  ch.armL.elbow.rotation.x = -lerp(.15, .35, f);
+  ch.hair.rotation.x = 0; ch.hair.scale.y = 1;
+  if (ch.rig) ch.rig.pose({ dead: true });
+}
+const DEATH_LIE_Y = .16;
+
 /* ---------- loop ---------- */
 camera.position.set(0, 1.4, 3);       // the game opens on the character, then swings behind (see startGame)
 let last = performance.now();
@@ -1339,7 +1589,7 @@ function frame(now) {
 }
 requestAnimationFrame(frame);
 addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
-window.__game = { S, sfx, LEN, LZ0, LZ1, walkers, autos, stones, potholes, P, get ch() { return ch; }, keys, get credits() { return credits; }, camera, spy: null, setFront(v) { frontView = v; }, orbit(a) { camOff = a; } };
+window.__game = { S, sfx, LEN, LZ0, LZ1, walkers, autos, stones, potholes, P, get ch() { return ch; }, keys, get credits() { return credits; }, get lives() { return lives; }, hurt, restart, renderer, camera, spy: null, setFront(v) { frontView = v; }, orbit(a) { camOff = a; } };
 </script>
 </body>
 </html>
