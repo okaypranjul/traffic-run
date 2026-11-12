@@ -1,8 +1,8 @@
-# Credit Run
+# Traffic Run
 
 A 3D browser game set on a Bangalore-style street. Walk or run down the road, collect credits, jump the potholes and stones, and stay out of the way of the oncoming auto-rickshaws.
 
-**Play:** https://okaypranjul.github.io/credit-run/
+**Play:** https://okaypranjul.github.io/traffic-run/
 
 ## Controls
 
